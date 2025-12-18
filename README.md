@@ -13,5 +13,5 @@ WhatsApp Bot with AI Auto-Reply and View Once Saver
 
 ### 1. Clone Repository
 ```bash
-git clone https://github.com/yourusername/olayinka-bot.git
+git clone https://github.com/Olaygold/Olasbot.git
 cd olayinka-bot
