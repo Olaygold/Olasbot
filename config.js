@@ -1,24 +1,16 @@
+
+// config.js
 module.exports = {
-    // ═══════════════════════════════════════════
-    //          OLAYINKA BOT CONFIGURATION
-    // ═══════════════════════════════════════════
-
-    // Bot Info
-    botName: "Olayinka Bot",
+    botName: "OLAYINKA BOT",
     ownerName: "Olayinka",
-    ownerNumber: "2349064767251", // 👈 Replace with your number (with country code, no +)
+    ownerNumber: "2349064767251", // Change to YOUR number (no + or spaces)
+    prefix: "!", // Use ! or . as prefix
+    timezone: "Africa/Lagos",
+    footer: "© OLAYINKA BOT 2025",
+    saveViewOnce: true,
+    autoAI: true,
     
-    // Bot Settings
-    prefix: "!",
-    autoAI: true,           // Auto reply with AI when no command
-    saveViewOnce: true,     // Save view once media
-    
-    // Messages
-    footer: "© Olayinka Bot 2026",
-    
-    // AI Settings (Free AI)
-    aiEnabled: true,
-
-    // Timezone
-    timezone: "Africa/Lagos"
+    // Bot status messages when owner is away
+    awayMode: false,
+    awayMessage: "👋 Hi! The owner is currently away. I'm an AI assistant and will try to help you. The owner will respond when available!"
 };
