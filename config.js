@@ -6,7 +6,7 @@ module.exports = {
     // Bot Info
     botName: "Olayinka Bot",
     ownerName: "Olayinka",
-    ownerNumber: "234XXXXXXXXXX", // 👈 Replace with your number (with country code, no +)
+    ownerNumber: "2349064767251", // 👈 Replace with your number (with country code, no +)
     
     // Bot Settings
     prefix: "!",
@@ -14,7 +14,7 @@ module.exports = {
     saveViewOnce: true,     // Save view once media
     
     // Messages
-    footer: "© Olayinka Bot 2024",
+    footer: "© Olayinka Bot 2026",
     
     // AI Settings (Free AI)
     aiEnabled: true,
