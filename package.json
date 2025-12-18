@@ -1,0 +1,24 @@
+{
+  "name": "olayinka-bot",
+  "version": "1.0.0",
+  "description": "Olayinka WhatsApp Bot with AI and View Once Saver",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["whatsapp", "bot", "olayinka"],
+  "author": "Olayinka",
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.6.0",
+    "pino": "^8.16.2",
+    "qrcode-terminal": "^0.12.0",
+    "axios": "^1.6.2",
+    "cheerio": "^1.0.0-rc.12",
+    "moment-timezone": "^0.5.43",
+    "fs-extra": "^11.2.0",
+    "file-type": "^16.5.4",
+    "node-fetch": "^2.7.0",
+    "express": "^4.18.2"
+  }
+}
