@@ -5,7 +5,8 @@ const {
     DisconnectReason,
     downloadMediaMessage,
     fetchLatestBaileysVersion,
-    getContentType
+    makeCacheableSignalKeyStore,
+    makeInMemoryStore
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const express = require('express');
@@ -15,33 +16,35 @@ const moment = require('moment-timezone');
 const config = require('./config');
 
 // ╔═══════════════════════════════════════════════════════════════╗
-// ║         OLAYINKA BOT V2 - VIEW ONCE + ADMIN COMMANDS          ║
-// ║              Clean • Minimal • Powerful • Working             ║
+// ║      OLAYINKA BOT V3 - FIXED PAIRING + VIEW ONCE + ADMIN      ║
+// ║                    100% WORKING VERSION                        ║
 // ╚═══════════════════════════════════════════════════════════════╝
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const AUTH_FOLDER = './auth_info';
 
-// Connection State
+// State Variables
 let qrImageData = null;
-let currentPairingCode = null;
-let connectionStatus = 'starting';
-let connectionMessage = 'Initializing...';
-let retryCount = 0;
+let pairingCode = null;
+let connectionStatus = 'disconnected';
 let sock = null;
-let startTime = Date.now();
+let retryCount = 0;
+
+// Group Settings Storage
+const groupSettings = new Map();
 
 // ═══════════════════════════════════════════════════════════════
 //                    UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════
 
-function clearAuthFolder() {
+function clearAuth() {
     try {
         if (fs.existsSync(AUTH_FOLDER)) {
             fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
-            console.log('🗑️ Auth folder cleared!');
         }
+        fs.mkdirSync(AUTH_FOLDER, { recursive: true });
+        console.log('🗑️ Auth cleared!');
         return true;
     } catch (e) {
         console.log('Clear error:', e.message);
@@ -50,405 +53,256 @@ function clearAuthFolder() {
 }
 
 const getTime = () => moment().tz(config.timezone).format('hh:mm:ss A');
-const getDate = () => moment().tz(config.timezone).format('dddd, MMMM Do YYYY');
-const getFullDate = () => moment().tz(config.timezone).format('DD/MM/YYYY HH:mm:ss');
+const getDate = () => moment().tz(config.timezone).format('DD/MM/YYYY');
+const getFullDate = () => moment().tz(config.timezone).format('dddd, DD MMMM YYYY');
 
 function getGreeting() {
-    const hour = moment().tz(config.timezone).hour();
-    if (hour >= 5 && hour < 12) return "🌅 Good Morning";
-    if (hour >= 12 && hour < 17) return "☀️ Good Afternoon";
-    if (hour >= 17 && hour < 21) return "🌆 Good Evening";
+    const h = moment().tz(config.timezone).hour();
+    if (h >= 5 && h < 12) return "🌅 Good Morning";
+    if (h >= 12 && h < 17) return "☀️ Good Afternoon";
+    if (h >= 17 && h < 21) return "🌆 Good Evening";
     return "🌙 Good Night";
 }
 
 function runtime(seconds) {
-    const days = Math.floor(seconds / 86400);
-    const hours = Math.floor((seconds % 86400) / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${days}d ${hours}h ${minutes}m ${secs}s`;
+    const d = Math.floor(seconds / 86400);
+    const h = Math.floor((seconds % 86400) / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    return `${d}d ${h}h ${m}m ${s}s`;
 }
 
-function sleep(ms) {
+function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ═══════════════════════════════════════════════════════════════
-//                    EXPRESS WEB SERVER
+//                    EXPRESS SERVER
 // ═══════════════════════════════════════════════════════════════
 
 app.get('/', (req, res) => res.send(getWebPage()));
-app.get('/qr', (req, res) => res.send(getWebPage()));
+
+app.get('/pair', async (req, res) => {
+    const number = req.query.number || config.ownerNumber;
+    if (sock && !sock.authState?.creds?.registered) {
+        try {
+            const code = await sock.requestPairingCode(number);
+            pairingCode = code;
+            console.log(`🔐 New pairing code for ${number}: ${code}`);
+        } catch (e) {
+            console.log('Pairing error:', e.message);
+        }
+    }
+    res.redirect('/');
+});
 
 app.get('/clear', (req, res) => {
-    clearAuthFolder();
-    connectionStatus = 'starting';
-    connectionMessage = 'Session cleared! Restarting...';
+    clearAuth();
+    connectionStatus = 'disconnected';
     qrImageData = null;
-    currentPairingCode = null;
+    pairingCode = null;
     retryCount = 0;
+    if (sock) {
+        try { sock.end(); } catch {}
+    }
     setTimeout(() => startBot(), 2000);
     res.redirect('/');
 });
 
 app.get('/restart', (req, res) => {
-    connectionStatus = 'starting';
-    connectionMessage = 'Restarting bot...';
+    if (sock) {
+        try { sock.end(); } catch {}
+    }
     setTimeout(() => startBot(), 1000);
     res.redirect('/');
 });
 
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: connectionStatus, 
-        uptime: Math.floor(process.uptime()),
-        runtime: runtime(process.uptime())
-    });
-});
-
-app.listen(PORT, () => {
-    console.log(`🌐 Web server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🌐 Server: http://localhost:${PORT}`));
 
 // ═══════════════════════════════════════════════════════════════
-//                    WEB PAGE TEMPLATE
+//                    WEB PAGE
 // ═══════════════════════════════════════════════════════════════
 
 function getWebPage() {
-    return `
-<!DOCTYPE html>
-<html lang="en">
+    return `<!DOCTYPE html>
+<html>
 <head>
     <title>${config.botName}</title>
-    <meta http-equiv="refresh" content="8">
+    <meta http-equiv="refresh" content="5">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-            color: #fff;
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        .container {
-            text-align: center;
-            padding: 40px;
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 25px;
-            backdrop-filter: blur(20px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            max-width: 450px;
-            width: 100%;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
-        }
-        .logo { font-size: 70px; margin-bottom: 15px; }
-        h1 {
-            font-size: 2em;
-            margin-bottom: 10px;
-            background: linear-gradient(90deg, #00ff88, #00d4ff, #ff00ff);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-        .owner { opacity: 0.7; margin-bottom: 25px; font-size: 0.95em; }
-        .status-box {
-            padding: 25px;
-            border-radius: 18px;
-            margin: 20px 0;
-            font-weight: 600;
-        }
-        .starting { background: rgba(255, 193, 7, 0.15); border: 2px solid #ffc107; }
-        .waiting { background: rgba(0, 150, 255, 0.15); border: 2px solid #0096ff; }
-        .connected { background: rgba(0, 255, 136, 0.15); border: 2px solid #00ff88; }
-        .error { background: rgba(255, 50, 50, 0.15); border: 2px solid #ff3232; }
-        .qr-container {
-            background: #fff;
-            padding: 20px;
-            border-radius: 20px;
-            display: inline-block;
-            margin: 20px 0;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-        }
-        .qr-container img { max-width: 280px; width: 100%; border-radius: 10px; }
-        .pairing-code {
-            font-size: 2.5em;
-            font-weight: bold;
-            letter-spacing: 8px;
-            color: #00ff88;
-            padding: 20px;
-            background: rgba(0, 0, 0, 0.4);
-            border-radius: 18px;
-            margin: 20px 0;
-            font-family: 'Courier New', monospace;
-            border: 2px dashed #00ff88;
-        }
-        .instructions {
-            text-align: left;
-            background: rgba(0, 0, 0, 0.3);
-            padding: 20px;
-            border-radius: 15px;
-            margin-top: 20px;
-            font-size: 0.9em;
-        }
-        .instructions h3 { color: #00d4ff; margin-bottom: 12px; }
-        .instructions ol { padding-left: 20px; }
-        .instructions li { margin: 10px 0; opacity: 0.9; }
-        .btn {
-            display: inline-block;
-            padding: 14px 30px;
-            margin: 10px;
-            border-radius: 12px;
-            text-decoration: none;
-            font-weight: bold;
-            transition: all 0.3s ease;
-            color: #fff;
-            font-size: 0.95em;
-        }
-        .btn-danger { background: linear-gradient(135deg, #ff4444, #cc0000); }
-        .btn-primary { background: linear-gradient(135deg, #4488ff, #0055cc); }
-        .btn:hover { transform: translateY(-3px); box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3); }
-        .features {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 10px;
-            margin-top: 20px;
-        }
-        .feature {
-            background: rgba(0, 255, 136, 0.15);
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-size: 0.85em;
-            border: 1px solid rgba(0, 255, 136, 0.3);
-        }
-        .refresh { opacity: 0.4; font-size: 0.8em; margin-top: 20px; }
-        .pulse { animation: pulse 2s infinite; }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:Arial,sans-serif;background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}
+        .box{text-align:center;padding:30px;background:rgba(0,0,0,0.3);border-radius:20px;max-width:400px;width:100%}
+        h1{color:#00ff88;margin:15px 0}
+        .status{padding:20px;border-radius:15px;margin:20px 0}
+        .online{background:rgba(0,255,100,0.2);border:2px solid #00ff88}
+        .offline{background:rgba(255,200,0,0.2);border:2px solid #ffcc00}
+        .error{background:rgba(255,50,50,0.2);border:2px solid #ff4444}
+        .qr{background:#fff;padding:15px;border-radius:15px;display:inline-block;margin:15px 0}
+        .qr img{max-width:250px}
+        .code{font-size:2em;font-weight:bold;letter-spacing:5px;color:#00ff88;background:#000;padding:15px 25px;border-radius:10px;margin:15px 0;display:inline-block;border:2px dashed #00ff88}
+        .btn{display:inline-block;padding:12px 25px;margin:8px;border-radius:10px;text-decoration:none;color:#fff;font-weight:bold}
+        .btn-red{background:#ff4444}
+        .btn-blue{background:#4488ff}
+        .btn-green{background:#00aa55}
+        input{padding:10px;border-radius:8px;border:none;margin:5px;width:200px;text-align:center}
+        .info{opacity:0.7;font-size:0.9em;margin-top:15px}
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="logo">🤖</div>
-        <h1>${config.botName}</h1>
-        <p class="owner">👑 by ${config.ownerName}</p>
+<div class="box">
+    <h1>🤖 ${config.botName}</h1>
+    <p>by ${config.ownerName}</p>
+    
+    ${connectionStatus === 'connected' ? `
+        <div class="status online">
+            <h2>✅ ONLINE</h2>
+            <p>Bot is running!</p>
+        </div>
+        <p>Send <b>!menu</b> to use</p>
+        <div style="margin-top:20px">
+            <a href="/clear" class="btn btn-red">🗑️ Logout</a>
+            <a href="/restart" class="btn btn-blue">🔄 Restart</a>
+        </div>
+    ` : connectionStatus === 'qr' ? `
+        <div class="status offline">
+            <h2>📱 Scan to Connect</h2>
+        </div>
         
-        ${connectionStatus === 'connected' ? `
-            <div class="status-box connected">
-                <h2>✅ BOT IS ONLINE!</h2>
-                <p style="margin-top:10px;opacity:0.8">Running 24/7</p>
-            </div>
-            <div class="features">
-                <span class="feature">📸 ViewOnce Saver</span>
-                <span class="feature">👑 Admin Commands</span>
-                <span class="feature">👥 Group Tools</span>
-            </div>
-            <p style="margin-top:20px;opacity:0.8">
-                Send <strong style="color:#00ff88">${config.prefix}menu</strong> to see commands
-            </p>
-            <div style="margin-top:25px;padding-top:20px;border-top:1px solid rgba(255,255,255,0.1)">
-                <a href="/clear" class="btn btn-danger" onclick="return confirm('Clear session and generate new QR?')">🗑️ Clear Session</a>
-                <a href="/restart" class="btn btn-primary">🔄 Restart</a>
-            </div>
-        ` : connectionStatus === 'qr' && qrImageData ? `
-            <div class="status-box waiting">
-                <h2>📱 Scan QR Code</h2>
-            </div>
-            <div class="qr-container">
-                <img src="${qrImageData}" alt="QR Code">
-            </div>
-            ${currentPairingCode ? `
-                <p style="opacity:0.7;margin:15px 0">Or use pairing code:</p>
-                <div class="pairing-code">${currentPairingCode}</div>
-            ` : ''}
-            <div class="instructions">
-                <h3>📋 How to Connect:</h3>
-                <ol>
-                    <li>Open WhatsApp on your phone</li>
-                    <li>Go to <strong>Settings → Linked Devices</strong></li>
-                    <li>Tap <strong>Link a Device</strong></li>
-                    <li>Scan this QR code or enter pairing code</li>
-                </ol>
-            </div>
-            <a href="/clear" class="btn btn-danger">🔄 Get New QR</a>
-        ` : connectionStatus === 'error' ? `
-            <div class="status-box error">
-                <h2>❌ Connection Error</h2>
-                <p style="margin-top:10px;font-size:0.9em">${connectionMessage}</p>
-            </div>
-            <p style="margin:20px 0;opacity:0.8">Click below to fix:</p>
-            <a href="/clear" class="btn btn-danger">🗑️ Clear & Reconnect</a>
-            <a href="/restart" class="btn btn-primary">🔄 Retry</a>
+        ${qrImageData ? `<div class="qr"><img src="${qrImageData}"></div>` : ''}
+        
+        ${pairingCode ? `
+            <p>Or use this code:</p>
+            <div class="code">${pairingCode}</div>
         ` : `
-            <div class="status-box starting">
-                <h2 class="pulse">⏳ ${connectionMessage}</h2>
-            </div>
-            <p style="margin-top:20px;opacity:0.7">Please wait...</p>
+            <p style="margin:15px 0">Get pairing code:</p>
+            <form action="/pair" method="get">
+                <input type="text" name="number" placeholder="2349064767251" value="${config.ownerNumber}">
+                <br>
+                <button type="submit" class="btn btn-green">Get Code</button>
+            </form>
         `}
         
-        <p class="refresh">🔄 Auto-refresh every 8s | Retry: ${retryCount}</p>
-    </div>
+        <div style="margin-top:15px;text-align:left;background:rgba(0,0,0,0.3);padding:15px;border-radius:10px">
+            <b>How to connect:</b><br>
+            1. Open WhatsApp<br>
+            2. Settings → Linked Devices<br>
+            3. Link a Device<br>
+            4. Scan QR or enter code
+        </div>
+        
+        <a href="/clear" class="btn btn-red" style="margin-top:15px">🔄 New QR</a>
+    ` : `
+        <div class="status error">
+            <h2>⏳ ${connectionStatus === 'connecting' ? 'Connecting...' : 'Waiting...'}</h2>
+        </div>
+        <a href="/clear" class="btn btn-red">🗑️ Reset</a>
+    `}
+    
+    <p class="info">Auto-refresh every 5s</p>
+</div>
 </body>
 </html>`;
 }
 
 // ═══════════════════════════════════════════════════════════════
-//                    BEAUTIFUL MENU DESIGN
+//                    MENU
 // ═══════════════════════════════════════════════════════════════
 
-function getMenuText() {
+function getMenu() {
     const p = config.prefix;
-    const uptime = runtime(process.uptime());
-    
     return `
-╔══════════════════════════════════════╗
-║                                      ║
-║   ✦ ═══════════════════════ ✦       ║
-║     🤖 *${config.botName}* 🤖         
-║   ✦ ═══════════════════════ ✦       ║
-║                                      ║
-╠══════════════════════════════════════╣
-║  ${getGreeting()}                    
-║  📅 ${getDate()}                     
-║  ⏰ ${getTime()}                     
-╚══════════════════════════════════════╝
+╔══════════════════════════════╗
+║  🤖 *${config.botName}* 🤖
+╠══════════════════════════════╣
+║  ${getGreeting()}
+║  📅 ${getFullDate()}
+║  ⏰ ${getTime()}
+║  ⏱️ Uptime: ${runtime(process.uptime())}
+╚══════════════════════════════╝
 
-┏━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃   📊 *BOT INFORMATION*      ┃
-┣━━━━━━━━━━━━━━━━━━━━━━━━━┫
-┃ 👑 Owner  : ${config.ownerName}
-┃ 🆙 Version: ${config.version}
-┃ ⏱️ Uptime : ${uptime}
-┃ 📸 ViewOnce: ✅ Active
-┗━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┏━━━ 📋 *MAIN* ━━━┓
+┃ ${p}menu - This menu
+┃ ${p}ping - Check speed
+┃ ${p}owner - Contact owner
+┃ ${p}runtime - Bot uptime
+┗━━━━━━━━━━━━━━━━━┛
 
-╭─────────────────────────╮
-│  📋 *MAIN COMMANDS*         │
-├─────────────────────────┤
-│ ${p}menu    - Show this menu
-│ ${p}help    - Help info
-│ ${p}owner   - Contact owner
-│ ${p}ping    - Check bot speed
-│ ${p}runtime - Bot uptime
-│ ${p}about   - About bot
-╰─────────────────────────╯
+┏━━━ 👥 *GROUP* ━━━┓
+┃ ${p}tagall - Tag everyone
+┃ ${p}hidetag <msg> - Silent tag
+┃ ${p}groupinfo - Group info
+┃ ${p}admins - List admins
+┃ ${p}link - Group link
+┃ ${p}revoke - Reset link
+┗━━━━━━━━━━━━━━━━━━┛
 
-╭─────────────────────────╮
-│  👥 *GROUP COMMANDS*        │
-├─────────────────────────┤
-│ ${p}tagall     - Tag all members
-│ ${p}hidetag    - Silent tag all
-│ ${p}groupinfo  - Group info
-│ ${p}admins     - List admins
-│ ${p}link       - Group link
-│ ${p}revoke     - Reset group link
-╰─────────────────────────╯
+┏━━━ 👑 *ADMIN* ━━━┓
+┃ ${p}kick @user - Remove user
+┃ ${p}add 234xxx - Add user
+┃ ${p}promote @user - Make admin
+┃ ${p}demote @user - Remove admin
+┃ ${p}mute - Close group
+┃ ${p}unmute - Open group
+┃ ${p}setname <name>
+┃ ${p}setdesc <desc>
+┃ ${p}antilink on/off
+┃ ${p}welcome on/off
+┃ ${p}goodbye on/off
+┗━━━━━━━━━━━━━━━━━━┛
 
-╭─────────────────────────╮
-│  👑 *ADMIN COMMANDS*        │
-├─────────────────────────┤
-│ ${p}kick @user    - Remove member
-│ ${p}add 234xxx    - Add member
-│ ${p}promote @user - Make admin
-│ ${p}demote @user  - Remove admin
-│ ${p}mute          - Mute group
-│ ${p}unmute        - Unmute group
-│ ${p}open          - Open group
-│ ${p}close         - Close group
-│ ${p}setname <name>- Change name
-│ ${p}setdesc <text>- Change desc
-│ ${p}disappear     - Set disappear
-│ ${p}antilink on/off
-│ ${p}welcome on/off
-│ ${p}goodbye on/off
-╰─────────────────────────╯
+┏━━━ 🛡️ *OWNER* ━━━┓
+┃ ${p}join <link> - Join group
+┃ ${p}leave - Leave group
+┃ ${p}block @user
+┃ ${p}unblock <number>
+┗━━━━━━━━━━━━━━━━━━┛
 
-╭─────────────────────────╮
-│  🛡️ *OWNER COMMANDS*        │
-├─────────────────────────┤
-│ ${p}broadcast <msg>  
-│ ${p}leave     - Leave group
-│ ${p}join <link>
-│ ${p}block @user
-│ ${p}unblock @user
-│ ${p}blocklist
-╰─────────────────────────╯
+┏━━━ 📸 *VIEW ONCE* ━━━┓
+┃ ✅ Auto-saves all view
+┃ once media to owner!
+┗━━━━━━━━━━━━━━━━━━━━━━┛
 
-╭─────────────────────────╮
-│  📸 *VIEW ONCE SAVER*       │
-├─────────────────────────┤
-│ ✅ Auto-saves all view     │
-│    once messages to owner  │
-│ 📷 Images • 🎥 Videos      │
-│ 🎵 Audio • All formats!    │
-╰─────────────────────────╯
-
-┏━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃  💡 *HOW TO USE:*           ┃
-┃  Type ${p}command            ┃
-┃  Example: ${p}tagall          ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-           ⚡ *${config.footer}* ⚡
+_Type ${p}command to use_
 `;
-}
-
-// ═══════════════════════════════════════════════════════════════
-//                    GROUP SETTINGS STORAGE
-// ═══════════════════════════════════════════════════════════════
-
-const groupSettings = {};
-
-function getGroupSetting(groupId, key, defaultValue = false) {
-    if (!groupSettings[groupId]) groupSettings[groupId] = {};
-    return groupSettings[groupId][key] ?? defaultValue;
-}
-
-function setGroupSetting(groupId, key, value) {
-    if (!groupSettings[groupId]) groupSettings[groupId] = {};
-    groupSettings[groupId][key] = value;
 }
 
 // ═══════════════════════════════════════════════════════════════
 //                    HELPER FUNCTIONS
 // ═══════════════════════════════════════════════════════════════
 
-async function isAdmin(sock, groupId, userId) {
+async function isAdmin(groupId, oderId) {
     try {
-        const groupMeta = await sock.groupMetadata(groupId);
-        const participant = groupMeta.participants.find(p => p.id === userId);
-        return participant?.admin === 'admin' || participant?.admin === 'superadmin';
-    } catch {
-        return false;
-    }
+        const meta = await sock.groupMetadata(groupId);
+        const member = meta.participants.find(p => p.id === oderId);
+        return member?.admin === 'admin' || member?.admin === 'superadmin';
+    } catch { return false; }
 }
 
-async function isBotAdmin(sock, groupId) {
+async function isBotAdmin(groupId) {
     try {
-        const groupMeta = await sock.groupMetadata(groupId);
-        const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-        const participant = groupMeta.participants.find(p => p.id === botNumber);
-        return participant?.admin === 'admin' || participant?.admin === 'superadmin';
-    } catch {
-        return false;
-    }
+        const meta = await sock.groupMetadata(groupId);
+        const botId = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+        const bot = meta.participants.find(p => p.id === botId);
+        return bot?.admin === 'admin' || bot?.admin === 'superadmin';
+    } catch { return false; }
 }
 
-function getMentionedJid(msg) {
+function getMentioned(msg) {
     const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
     const quoted = msg.message?.extendedTextMessage?.contextInfo?.participant;
     if (quoted && !mentioned.includes(quoted)) mentioned.push(quoted);
     return mentioned;
 }
 
-function getQuotedParticipant(msg) {
-    return msg.message?.extendedTextMessage?.contextInfo?.participant || null;
+function getSetting(gid, key) {
+    return groupSettings.get(gid)?.[key] || false;
+}
+
+function setSetting(gid, key, val) {
+    if (!groupSettings.has(gid)) groupSettings.set(gid, {});
+    groupSettings.get(gid)[key] = val;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -456,8 +310,7 @@ function getQuotedParticipant(msg) {
 // ═══════════════════════════════════════════════════════════════
 
 async function startBot() {
-    connectionStatus = 'starting';
-    connectionMessage = 'Connecting to WhatsApp...';
+    connectionStatus = 'connecting';
     
     try {
         if (!fs.existsSync(AUTH_FOLDER)) {
@@ -467,115 +320,82 @@ async function startBot() {
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
         const { version } = await fetchLatestBaileysVersion();
         
-        console.log(`\n🔄 Starting bot... (Attempt ${retryCount + 1})`);
+        console.log('\n🔄 Starting bot...\n');
         
         sock = makeWASocket({
             version,
             logger: pino({ level: 'silent' }),
             printQRInTerminal: true,
             auth: state,
-            browser: ['Olayinka Bot', 'Chrome', '120.0.0'],
+            browser: ['Ubuntu', 'Chrome', '120.0.0'],
             connectTimeoutMs: 60000,
-            qrTimeout: 60000,
-            defaultQueryTimeoutMs: 60000
+            qrTimeout: 40000,
+            defaultQueryTimeoutMs: 60000,
+            syncFullHistory: false
         });
         
-        // ═══════ CONNECTION EVENTS ═══════
+        // ═══════ CONNECTION HANDLER ═══════
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
             
             if (qr) {
-                console.log('📱 QR Code generated!');
+                console.log('\n📱 QR Code ready! Scan it or use pairing code.\n');
                 connectionStatus = 'qr';
-                connectionMessage = 'Scan QR code to connect';
-                retryCount = 0;
+                qrImageData = await QRCode.toDataURL(qr, { width: 300 });
                 
-                try {
-                    qrImageData = await QRCode.toDataURL(qr, { 
-                        width: 300, 
-                        margin: 2,
-                        color: { dark: '#000000', light: '#ffffff' }
-                    });
-                    
-                    // Try to get pairing code
-                    setTimeout(async () => {
-                        if (!sock?.authState?.creds?.registered) {
-                            try {
-                                currentPairingCode = await sock.requestPairingCode(config.ownerNumber);
-                                console.log(`🔐 Pairing Code: ${currentPairingCode}`);
-                            } catch (e) {
-                                console.log('Pairing code not available, use QR');
-                            }
-                        }
-                    }, 5000);
-                } catch (e) {
-                    console.log('QR generation error:', e.message);
+                // Auto request pairing code
+                await delay(3000);
+                if (!sock.authState?.creds?.registered) {
+                    try {
+                        pairingCode = await sock.requestPairingCode(config.ownerNumber);
+                        console.log(`\n🔐 PAIRING CODE: ${pairingCode}\n`);
+                        console.log(`   Enter this code in WhatsApp to connect!\n`);
+                    } catch (e) {
+                        console.log('⚠️ Could not get pairing code:', e.message);
+                        console.log('   Use QR code instead.\n');
+                    }
                 }
             }
             
             if (connection === 'close') {
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
-                console.log(`\n❌ Connection closed (Code: ${statusCode})`);
+                const code = lastDisconnect?.error?.output?.statusCode;
+                console.log(`\n❌ Disconnected (${code})\n`);
                 
                 qrImageData = null;
-                currentPairingCode = null;
+                pairingCode = null;
+                connectionStatus = 'disconnected';
                 
-                if (statusCode === DisconnectReason.loggedOut || 
-                    statusCode === DisconnectReason.badSession ||
-                    statusCode === 401 || statusCode === 403 || statusCode === 405) {
-                    console.log('🗑️ Clearing invalid session...');
-                    clearAuthFolder();
-                    retryCount = 0;
-                    connectionStatus = 'starting';
-                    connectionMessage = 'Session expired, reconnecting...';
-                } else {
-                    retryCount++;
-                    connectionStatus = 'error';
-                    connectionMessage = `Reconnecting... (${retryCount})`;
-                    
-                    if (retryCount > 5) {
-                        console.log('🗑️ Too many retries, clearing session...');
-                        clearAuthFolder();
-                        retryCount = 0;
-                    }
+                const shouldReconnect = code !== DisconnectReason.loggedOut && 
+                                        code !== 401 && code !== 403 && code !== 405;
+                
+                if (!shouldReconnect) {
+                    console.log('🗑️ Session invalid, clearing...\n');
+                    clearAuth();
                 }
                 
-                setTimeout(startBot, 5000);
+                retryCount++;
+                if (retryCount > 5) {
+                    clearAuth();
+                    retryCount = 0;
+                }
+                
+                setTimeout(startBot, 3000);
             }
             
             if (connection === 'open') {
                 console.log('\n✅ BOT CONNECTED SUCCESSFULLY!\n');
                 connectionStatus = 'connected';
-                connectionMessage = 'Online';
-                retryCount = 0;
                 qrImageData = null;
-                currentPairingCode = null;
+                pairingCode = null;
+                retryCount = 0;
                 
-                // Send welcome message to owner
+                // Welcome message
                 try {
-                    const ownerJid = config.ownerNumber + '@s.whatsapp.net';
-                    await sock.sendMessage(ownerJid, {
-                        text: `╔═══════════════════════════╗
-║  ✅ *BOT CONNECTED!*      ║
-╠═══════════════════════════╣
-║                           ║
-║  🤖 ${config.botName}     
-║  👑 Owner: ${config.ownerName}
-║                           ║
-║  ⏰ ${getTime()}          
-║  📅 ${getDate()}          
-║                           ║
-║  📸 ViewOnce Saver: ✅    ║
-║  👑 Admin Commands: ✅    ║
-║  👥 Group Tools: ✅       ║
-║                           ║
-╠═══════════════════════════╣
-║  Type ${config.prefix}menu for commands   ║
-╚═══════════════════════════╝`
+                    await sock.sendMessage(config.ownerNumber + '@s.whatsapp.net', {
+                        text: `✅ *${config.botName} Connected!*\n\n⏰ ${getTime()}\n📅 ${getFullDate()}\n\n📸 ViewOnce Saver: ON\n👑 Admin Commands: ON\n\nType *${config.prefix}menu* for commands`
                     });
-                    console.log('📨 Welcome message sent to owner');
                 } catch (e) {
-                    console.log('Could not send welcome message:', e.message);
+                    console.log('Could not send welcome:', e.message);
                 }
             }
         });
@@ -586,856 +406,500 @@ async function startBot() {
         //                    MESSAGE HANDLER
         // ═══════════════════════════════════════════════════════════════
         
-        sock.ev.on('messages.upsert', async (m) => {
+        sock.ev.on('messages.upsert', async ({ messages, type }) => {
             try {
-                if (m.type !== 'notify') return;
-                
-                const msg = m.messages[0];
-                if (!msg?.message) return;
+                // Process all message types
+                const msg = messages[0];
+                if (!msg) return;
+                if (!msg.message) return;
                 if (msg.key.fromMe) return;
                 
                 const from = msg.key.remoteJid;
                 if (!from) return;
+                if (from === 'status@broadcast') return;
                 
                 const sender = msg.key.participant || from;
-                const senderNumber = sender.split('@')[0];
+                const senderNum = sender.split('@')[0];
                 const pushName = msg.pushName || 'User';
                 const isGroup = from.endsWith('@g.us');
-                const isOwner = senderNumber === config.ownerNumber;
+                const isOwner = senderNum === config.ownerNumber;
                 
-                // ═══════ MESSAGE TYPE & BODY EXTRACTION ═══════
-                const messageType = Object.keys(msg.message).filter(
-                    k => k !== 'messageContextInfo' && 
-                         k !== 'senderKeyDistributionMessage'
-                )[0];
-                
-                let body = '';
-                
-                switch(messageType) {
-                    case 'conversation':
-                        body = msg.message.conversation || '';
-                        break;
-                    case 'extendedTextMessage':
-                        body = msg.message.extendedTextMessage?.text || '';
-                        break;
-                    case 'imageMessage':
-                        body = msg.message.imageMessage?.caption || '';
-                        break;
-                    case 'videoMessage':
-                        body = msg.message.videoMessage?.caption || '';
-                        break;
-                    case 'documentMessage':
-                        body = msg.message.documentMessage?.caption || '';
-                        break;
-                    case 'ephemeralMessage':
-                        const eph = msg.message.ephemeralMessage?.message;
-                        if (eph?.conversation) body = eph.conversation;
-                        else if (eph?.extendedTextMessage) body = eph.extendedTextMessage.text || '';
-                        break;
-                    default:
-                        const content = msg.message[messageType];
-                        if (content?.text) body = content.text;
-                        else if (content?.caption) body = content.caption;
-                }
-                
-                body = body.trim();
-                
-                // ═══════ DEBUG LOG ═══════
-                console.log(`\n📨 ${pushName} (${senderNumber}): ${body.slice(0, 50) || '[media]'}`);
+                // ═══════ GET MESSAGE CONTENT ═══════
+                const msgType = Object.keys(msg.message).find(k => 
+                    k !== 'messageContextInfo' && 
+                    k !== 'senderKeyDistributionMessage'
+                );
                 
                 // ═══════════════════════════════════════════════════════════════
-                //                    VIEW ONCE SAVER
+                //                    VIEW ONCE SAVER (FIXED)
                 // ═══════════════════════════════════════════════════════════════
                 
-                if ((messageType === 'viewOnceMessageV2' || messageType === 'viewOnceMessage') && config.saveViewOnce) {
-                    console.log(`\n📸 VIEW ONCE DETECTED from ${pushName}!`);
+                if (msgType === 'viewOnceMessageV2' || msgType === 'viewOnceMessage') {
+                    console.log(`\n📸 VIEW ONCE from ${pushName} (${senderNum})!\n`);
                     
-                    try {
-                        const viewOnceMsg = msg.message.viewOnceMessageV2 || msg.message.viewOnceMessage;
-                        const mediaType = Object.keys(viewOnceMsg.message)[0];
-                        const mediaBuffer = await downloadMediaMessage(
-                            { message: viewOnceMsg.message },
-                            'buffer',
-                            {}
-                        );
-                        
-                        const caption = `
-╔═══════════════════════════════╗
-║   📸 *VIEW ONCE SAVED!* 📸   ║
-╠═══════════════════════════════╣
-║                               ║
+                    if (config.saveViewOnce) {
+                        try {
+                            const viewOnce = msg.message.viewOnceMessageV2?.message || 
+                                           msg.message.viewOnceMessage?.message;
+                            
+                            if (!viewOnce) {
+                                console.log('❌ Could not extract viewOnce content');
+                                return;
+                            }
+                            
+                            const mediaType = Object.keys(viewOnce).find(k => 
+                                k.includes('image') || k.includes('video') || k.includes('audio')
+                            );
+                            
+                            if (!mediaType) {
+                                console.log('❌ Unknown media type in viewOnce');
+                                return;
+                            }
+                            
+                            console.log(`📥 Downloading ${mediaType}...`);
+                            
+                            const buffer = await downloadMediaMessage(
+                                { message: viewOnce },
+                                'buffer',
+                                {},
+                                {
+                                    logger: pino({ level: 'silent' }),
+                                    reuploadRequest: sock.updateMediaMessage
+                                }
+                            );
+                            
+                            if (!buffer || buffer.length === 0) {
+                                console.log('❌ Download failed - empty buffer');
+                                return;
+                            }
+                            
+                            console.log(`✅ Downloaded! Size: ${buffer.length} bytes`);
+                            
+                            const caption = `╔══════════════════════════╗
+║  📸 *VIEW ONCE SAVED!*   ║
+╠══════════════════════════╣
 ║ 👤 From: ${pushName}
-║ 📱 Number: ${senderNumber}
-║ ${isGroup ? `👥 Group: ${from.split('@')[0]}` : '💬 Private Chat'}
-║                               ║
-║ ⏰ Time: ${getTime()}
-║ 📅 Date: ${getDate()}
-║                               ║
-╚═══════════════════════════════╝`;
-                        
-                        const ownerJid = config.ownerNumber + '@s.whatsapp.net';
-                        
-                        if (mediaType.includes('image')) {
-                            await sock.sendMessage(ownerJid, { 
-                                image: mediaBuffer, 
-                                caption: caption 
-                            });
-                        } else if (mediaType.includes('video')) {
-                            await sock.sendMessage(ownerJid, { 
-                                video: mediaBuffer, 
-                                caption: caption 
-                            });
-                        } else if (mediaType.includes('audio')) {
-                            await sock.sendMessage(ownerJid, { 
-                                audio: mediaBuffer, 
-                                mimetype: 'audio/mp4',
-                                ptt: true 
-                            });
-                            await sock.sendMessage(ownerJid, { text: caption });
+║ 📱 Number: ${senderNum}
+║ ${isGroup ? '👥 Group: ' + (await sock.groupMetadata(from).catch(() => ({subject:'Unknown'}))).subject : '💬 Private Chat'}
+║ ⏰ ${getTime()}
+║ 📅 ${getDate()}
+╚══════════════════════════╝`;
+                            
+                            const ownerJid = config.ownerNumber + '@s.whatsapp.net';
+                            
+                            if (mediaType.includes('image')) {
+                                await sock.sendMessage(ownerJid, { image: buffer, caption });
+                                console.log('✅ Image sent to owner!');
+                            } else if (mediaType.includes('video')) {
+                                await sock.sendMessage(ownerJid, { video: buffer, caption });
+                                console.log('✅ Video sent to owner!');
+                            } else if (mediaType.includes('audio')) {
+                                await sock.sendMessage(ownerJid, { audio: buffer, mimetype: 'audio/mp4', ptt: true });
+                                await sock.sendMessage(ownerJid, { text: caption });
+                                console.log('✅ Audio sent to owner!');
+                            }
+                            
+                        } catch (e) {
+                            console.log('❌ ViewOnce save error:', e.message);
                         }
-                        
-                        console.log('✅ View Once saved and sent to owner!');
-                    } catch (e) {
-                        console.log('❌ View Once save error:', e.message);
                     }
                     return;
                 }
                 
-                // Skip if no text
-                if (!body) return;
+                // ═══════ GET TEXT BODY ═══════
+                let body = '';
                 
-                // ═══════════════════════════════════════════════════════════════
-                //                    COMMAND PROCESSING
-                // ═══════════════════════════════════════════════════════════════
+                if (msg.message.conversation) {
+                    body = msg.message.conversation;
+                } else if (msg.message.extendedTextMessage?.text) {
+                    body = msg.message.extendedTextMessage.text;
+                } else if (msg.message.imageMessage?.caption) {
+                    body = msg.message.imageMessage.caption;
+                } else if (msg.message.videoMessage?.caption) {
+                    body = msg.message.videoMessage.caption;
+                } else if (msg.message.documentMessage?.caption) {
+                    body = msg.message.documentMessage.caption;
+                } else if (msg.message.ephemeralMessage?.message?.extendedTextMessage?.text) {
+                    body = msg.message.ephemeralMessage.message.extendedTextMessage.text;
+                } else if (msg.message.ephemeralMessage?.message?.conversation) {
+                    body = msg.message.ephemeralMessage.message.conversation;
+                }
                 
-                const prefix = config.prefix;
+                body = body?.trim() || '';
                 
-                if (!body.startsWith(prefix)) return;
+                // Debug log
+                if (body) {
+                    console.log(`📩 ${pushName}: ${body.slice(0, 50)}`);
+                }
                 
-                const args = body.slice(prefix.length).trim().split(/ +/);
+                // ═══════ ANTILINK CHECK ═══════
+                if (isGroup && getSetting(from, 'antilink') && !await isAdmin(from, sender)) {
+                    if (body.includes('chat.whatsapp.com/')) {
+                        try {
+                            await sock.sendMessage(from, { delete: msg.key });
+                            await sock.sendMessage(from, { 
+                                text: `⚠️ @${senderNum} links are not allowed!`,
+                                mentions: [sender]
+                            });
+                        } catch {}
+                        return;
+                    }
+                }
+                
+                // ═══════ COMMAND CHECK ═══════
+                if (!body.startsWith(config.prefix)) return;
+                
+                const args = body.slice(config.prefix.length).trim().split(/ +/);
                 const cmd = args.shift().toLowerCase();
                 
-                console.log(`⚡ Command: ${cmd} | Args: ${args.join(', ') || 'none'}`);
+                console.log(`⚡ CMD: ${cmd} | Args: ${args.join(' ') || 'none'}`);
                 
-                // React to show processing
-                try {
-                    await sock.sendMessage(from, { react: { text: '⏳', key: msg.key } });
-                } catch {}
+                // React loading
+                await sock.sendMessage(from, { react: { text: '⏳', key: msg.key } }).catch(() => {});
+                
+                let reply = '';
                 
                 try {
-                    let response = '';
-                    
-                    // ═══════ MAIN COMMANDS ═══════
-                    switch(cmd) {
+                    switch (cmd) {
+                        
+                        // ═══════ MAIN ═══════
                         case 'menu':
                         case 'help':
-                        case 'commands':
-                            response = getMenuText();
-                            break;
-                        
-                        case 'owner':
-                            response = `
-╔═══════════════════════════╗
-║     👑 *BOT OWNER* 👑     ║
-╠═══════════════════════════╣
-║                           ║
-║  👤 Name: ${config.ownerName}
-║  📱 Number: ${config.ownerNumber}
-║  🔗 wa.me/${config.ownerNumber}
-║                           ║
-╚═══════════════════════════╝`;
+                            reply = getMenu();
                             break;
                         
                         case 'ping':
                             const start = Date.now();
-                            await sock.sendMessage(from, { text: 'Testing...' });
-                            const ping = Date.now() - start;
-                            response = `🏓 *Pong!*\n\n⚡ Speed: ${ping}ms\n📶 Status: ${ping < 100 ? 'Excellent' : ping < 300 ? 'Good' : 'Slow'}`;
+                            reply = `🏓 Pong! ${Date.now() - start}ms`;
+                            break;
+                        
+                        case 'owner':
+                            reply = `👑 *Owner:* ${config.ownerName}\n📱 wa.me/${config.ownerNumber}`;
                             break;
                         
                         case 'runtime':
                         case 'uptime':
-                            response = `⏱️ *Bot Uptime:*\n\n${runtime(process.uptime())}`;
+                            reply = `⏱️ *Uptime:* ${runtime(process.uptime())}`;
                             break;
                         
-                        case 'about':
-                        case 'info':
-                            response = `
-╔═══════════════════════════╗
-║   🤖 *${config.botName}* 🤖   
-╠═══════════════════════════╣
-║                           ║
-║  👑 Owner: ${config.ownerName}
-║  🆙 Version: ${config.version}
-║  ⏱️ Uptime: ${runtime(process.uptime())}
-║                           ║
-║  ✅ Features:             ║
-║  • ViewOnce Saver         ║
-║  • Group Management       ║
-║  • Admin Tools            ║
-║                           ║
-╚═══════════════════════════╝`;
-                            break;
-                        
-                        // ═══════ GROUP COMMANDS ═══════
+                        // ═══════ GROUP ═══════
                         case 'tagall':
                         case 'all':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
                             try {
-                                const group = await sock.groupMetadata(from);
-                                const members = group.participants.map(p => p.id);
-                                let text = `📢 *TAG ALL MEMBERS*\n👥 Total: ${members.length}\n\n`;
-                                members.forEach(m => { text += `@${m.split('@')[0]} `; });
-                                text += `\n\n📝 ${args.join(' ') || 'Attention everyone!'}`;
-                                await sock.sendMessage(from, { text, mentions: members }, { quoted: msg });
+                                const meta = await sock.groupMetadata(from);
+                                const members = meta.participants.map(p => p.id);
+                                let txt = `📢 *TAG ALL* (${members.length})\n\n`;
+                                members.forEach(m => txt += `@${m.split('@')[0]} `);
+                                if (args.length) txt += `\n\n📝 ${args.join(' ')}`;
+                                await sock.sendMessage(from, { text: txt, mentions: members }, { quoted: msg });
                                 await sock.sendMessage(from, { react: { text: '✅', key: msg.key } });
                                 return;
-                            } catch (e) {
-                                response = '❌ Failed to tag members!';
-                            }
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'hidetag':
                         case 'h':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!args.length) {
-                                response = `❌ Usage: ${prefix}hidetag <message>`;
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!args.length) { reply = `❌ Usage: ${config.prefix}hidetag message`; break; }
                             try {
-                                const group = await sock.groupMetadata(from);
-                                const members = group.participants.map(p => p.id);
-                                await sock.sendMessage(from, { 
-                                    text: args.join(' '), 
-                                    mentions: members 
-                                });
+                                const meta = await sock.groupMetadata(from);
+                                const members = meta.participants.map(p => p.id);
+                                await sock.sendMessage(from, { text: args.join(' '), mentions: members });
                                 await sock.sendMessage(from, { react: { text: '✅', key: msg.key } });
                                 return;
-                            } catch {
-                                response = '❌ Failed!';
-                            }
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'groupinfo':
                         case 'ginfo':
-                        case 'gc':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
                             try {
                                 const g = await sock.groupMetadata(from);
-                                const admins = g.participants.filter(p => p.admin);
-                                response = `
-╔═══════════════════════════╗
-║    👥 *GROUP INFO*        ║
-╠═══════════════════════════╣
-║                           ║
-║ 📛 Name: ${g.subject}
-║ 🆔 ID: ${from.split('@')[0]}
-║ 👤 Members: ${g.participants.length}
-║ 👑 Admins: ${admins.length}
-║ 📅 Created: ${moment(g.creation * 1000).format('DD/MM/YYYY')}
-║ ✍️ Creator: @${g.owner?.split('@')[0] || 'Unknown'}
-║                           ║
-║ 📝 Description:           ║
-${g.desc || 'No description'}
-║                           ║
-╚═══════════════════════════╝`;
-                            } catch {
-                                response = '❌ Failed to get group info!';
-                            }
+                                const admins = g.participants.filter(p => p.admin).length;
+                                reply = `👥 *${g.subject}*\n\n` +
+                                    `📊 Members: ${g.participants.length}\n` +
+                                    `👑 Admins: ${admins}\n` +
+                                    `📅 Created: ${moment(g.creation * 1000).format('DD/MM/YYYY')}\n` +
+                                    `📝 ${g.desc || 'No description'}`;
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'admins':
-                        case 'listadmin':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
                             try {
                                 const g = await sock.groupMetadata(from);
                                 const admins = g.participants.filter(p => p.admin);
-                                let text = `👑 *GROUP ADMINS*\n📊 Total: ${admins.length}\n\n`;
-                                admins.forEach((a, i) => {
-                                    text += `${i + 1}. @${a.id.split('@')[0]} ${a.admin === 'superadmin' ? '(Creator)' : ''}\n`;
-                                });
-                                await sock.sendMessage(from, { 
-                                    text, 
-                                    mentions: admins.map(a => a.id) 
-                                }, { quoted: msg });
+                                let txt = `👑 *Admins (${admins.length}):*\n\n`;
+                                admins.forEach((a, i) => txt += `${i+1}. @${a.id.split('@')[0]}\n`);
+                                await sock.sendMessage(from, { text: txt, mentions: admins.map(a => a.id) }, { quoted: msg });
                                 await sock.sendMessage(from, { react: { text: '✅', key: msg.key } });
                                 return;
-                            } catch {
-                                response = '❌ Failed!';
-                            }
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'link':
-                        case 'grouplink':
-                        case 'gclink':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
                             try {
                                 const code = await sock.groupInviteCode(from);
-                                response = `🔗 *Group Invite Link:*\n\nhttps://chat.whatsapp.com/${code}`;
-                            } catch {
-                                response = '❌ Failed! Bot needs admin rights.';
-                            }
+                                reply = `🔗 https://chat.whatsapp.com/${code}`;
+                            } catch { reply = '❌ Bot needs admin!'; }
                             break;
                         
                         case 'revoke':
-                        case 'resetlink':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            if (!await isBotAdmin(sock, from)) {
-                                response = '❌ Bot needs admin rights!';
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (!await isBotAdmin(from)) { reply = '❌ Bot needs admin!'; break; }
                             try {
                                 await sock.groupRevokeInvite(from);
-                                const newCode = await sock.groupInviteCode(from);
-                                response = `✅ *Link Reset!*\n\n🔗 New link:\nhttps://chat.whatsapp.com/${newCode}`;
-                            } catch {
-                                response = '❌ Failed to reset link!';
-                            }
+                                const code = await sock.groupInviteCode(from);
+                                reply = `✅ Link reset!\n🔗 https://chat.whatsapp.com/${code}`;
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
-                        // ═══════ ADMIN COMMANDS ═══════
+                        // ═══════ ADMIN ═══════
                         case 'kick':
                         case 'remove':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            if (!await isBotAdmin(sock, from)) {
-                                response = '❌ Bot needs admin rights!';
-                                break;
-                            }
-                            const kickTarget = getMentionedJid(msg)[0] || getQuotedParticipant(msg);
-                            if (!kickTarget) {
-                                response = `❌ Tag or reply to someone!\n\nUsage: ${prefix}kick @user`;
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (!await isBotAdmin(from)) { reply = '❌ Bot needs admin!'; break; }
+                            const kickTarget = getMentioned(msg)[0];
+                            if (!kickTarget) { reply = '❌ Tag someone!'; break; }
                             try {
                                 await sock.groupParticipantsUpdate(from, [kickTarget], 'remove');
-                                response = `✅ Successfully removed @${kickTarget.split('@')[0]}`;
-                            } catch {
-                                response = '❌ Failed to remove member!';
-                            }
+                                reply = `✅ Removed @${kickTarget.split('@')[0]}`;
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'add':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            if (!await isBotAdmin(sock, from)) {
-                                response = '❌ Bot needs admin rights!';
-                                break;
-                            }
-                            if (!args[0]) {
-                                response = `❌ Provide a number!\n\nUsage: ${prefix}add 2348012345678`;
-                                break;
-                            }
-                            const addNumber = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (!await isBotAdmin(from)) { reply = '❌ Bot needs admin!'; break; }
+                            if (!args[0]) { reply = '❌ Provide number!'; break; }
+                            const addNum = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                             try {
-                                await sock.groupParticipantsUpdate(from, [addNumber], 'add');
-                                response = `✅ Successfully added @${args[0].replace(/[^0-9]/g, '')}`;
-                            } catch (e) {
-                                response = '❌ Failed! Number may have privacy settings or is not on WhatsApp.';
-                            }
+                                await sock.groupParticipantsUpdate(from, [addNum], 'add');
+                                reply = `✅ Added!`;
+                            } catch { reply = '❌ Failed! Check number.'; }
                             break;
                         
                         case 'promote':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            if (!await isBotAdmin(sock, from)) {
-                                response = '❌ Bot needs admin rights!';
-                                break;
-                            }
-                            const promoteTarget = getMentionedJid(msg)[0] || getQuotedParticipant(msg);
-                            if (!promoteTarget) {
-                                response = `❌ Tag or reply to someone!\n\nUsage: ${prefix}promote @user`;
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (!await isBotAdmin(from)) { reply = '❌ Bot needs admin!'; break; }
+                            const promoteTarget = getMentioned(msg)[0];
+                            if (!promoteTarget) { reply = '❌ Tag someone!'; break; }
                             try {
                                 await sock.groupParticipantsUpdate(from, [promoteTarget], 'promote');
-                                response = `✅ @${promoteTarget.split('@')[0]} is now admin! 👑`;
-                            } catch {
-                                response = '❌ Failed to promote!';
-                            }
+                                reply = `✅ @${promoteTarget.split('@')[0]} is now admin! 👑`;
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'demote':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            if (!await isBotAdmin(sock, from)) {
-                                response = '❌ Bot needs admin rights!';
-                                break;
-                            }
-                            const demoteTarget = getMentionedJid(msg)[0] || getQuotedParticipant(msg);
-                            if (!demoteTarget) {
-                                response = `❌ Tag or reply to someone!\n\nUsage: ${prefix}demote @user`;
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (!await isBotAdmin(from)) { reply = '❌ Bot needs admin!'; break; }
+                            const demoteTarget = getMentioned(msg)[0];
+                            if (!demoteTarget) { reply = '❌ Tag someone!'; break; }
                             try {
                                 await sock.groupParticipantsUpdate(from, [demoteTarget], 'demote');
-                                response = `✅ @${demoteTarget.split('@')[0]} is no longer admin.`;
-                            } catch {
-                                response = '❌ Failed to demote!';
-                            }
+                                reply = `✅ @${demoteTarget.split('@')[0]} removed from admin`;
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'mute':
                         case 'close':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            if (!await isBotAdmin(sock, from)) {
-                                response = '❌ Bot needs admin rights!';
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (!await isBotAdmin(from)) { reply = '❌ Bot needs admin!'; break; }
                             try {
                                 await sock.groupSettingUpdate(from, 'announcement');
-                                response = '🔒 Group is now *CLOSED*!\n\nOnly admins can send messages.';
-                            } catch {
-                                response = '❌ Failed to close group!';
-                            }
+                                reply = '🔒 Group closed! Admins only can chat.';
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'unmute':
                         case 'open':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            if (!await isBotAdmin(sock, from)) {
-                                response = '❌ Bot needs admin rights!';
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (!await isBotAdmin(from)) { reply = '❌ Bot needs admin!'; break; }
                             try {
                                 await sock.groupSettingUpdate(from, 'not_announcement');
-                                response = '🔓 Group is now *OPEN*!\n\nEveryone can send messages.';
-                            } catch {
-                                response = '❌ Failed to open group!';
-                            }
+                                reply = '🔓 Group opened! Everyone can chat.';
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'setname':
-                        case 'setsubject':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            if (!await isBotAdmin(sock, from)) {
-                                response = '❌ Bot needs admin rights!';
-                                break;
-                            }
-                            if (!args.length) {
-                                response = `❌ Provide new name!\n\nUsage: ${prefix}setname New Group Name`;
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (!await isBotAdmin(from)) { reply = '❌ Bot needs admin!'; break; }
+                            if (!args.length) { reply = '❌ Provide name!'; break; }
                             try {
                                 await sock.groupUpdateSubject(from, args.join(' '));
-                                response = `✅ Group name changed to: *${args.join(' ')}*`;
-                            } catch {
-                                response = '❌ Failed to change name!';
-                            }
+                                reply = `✅ Name changed to: ${args.join(' ')}`;
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'setdesc':
-                        case 'setdescription':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            if (!await isBotAdmin(sock, from)) {
-                                response = '❌ Bot needs admin rights!';
-                                break;
-                            }
-                            if (!args.length) {
-                                response = `❌ Provide description!\n\nUsage: ${prefix}setdesc Your description here`;
-                                break;
-                            }
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (!await isBotAdmin(from)) { reply = '❌ Bot needs admin!'; break; }
+                            if (!args.length) { reply = '❌ Provide description!'; break; }
                             try {
                                 await sock.groupUpdateDescription(from, args.join(' '));
-                                response = '✅ Group description updated!';
-                            } catch {
-                                response = '❌ Failed to change description!';
-                            }
-                            break;
-                        
-                        case 'disappear':
-                        case 'ephemeral':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            if (!await isBotAdmin(sock, from)) {
-                                response = '❌ Bot needs admin rights!';
-                                break;
-                            }
-                            const duration = args[0]?.toLowerCase();
-                            let ephemeralTime = 0;
-                            if (duration === '24h') ephemeralTime = 86400;
-                            else if (duration === '7d') ephemeralTime = 604800;
-                            else if (duration === '90d') ephemeralTime = 7776000;
-                            else if (duration === 'off') ephemeralTime = 0;
-                            else {
-                                response = `❌ Usage: ${prefix}disappear <24h|7d|90d|off>`;
-                                break;
-                            }
-                            try {
-                                await sock.sendMessage(from, { disappearingMessagesInChat: ephemeralTime });
-                                response = ephemeralTime ? `✅ Disappearing messages: ${duration}` : '✅ Disappearing messages: OFF';
-                            } catch {
-                                response = '❌ Failed!';
-                            }
+                                reply = '✅ Description updated!';
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'antilink':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            const antiStatus = args[0]?.toLowerCase();
-                            if (antiStatus === 'on') {
-                                setGroupSetting(from, 'antilink', true);
-                                response = '✅ Antilink is now *ON*!\n\nGroup links will be deleted.';
-                            } else if (antiStatus === 'off') {
-                                setGroupSetting(from, 'antilink', false);
-                                response = '✅ Antilink is now *OFF*!';
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (args[0] === 'on') {
+                                setSetting(from, 'antilink', true);
+                                reply = '✅ Antilink ON!';
+                            } else if (args[0] === 'off') {
+                                setSetting(from, 'antilink', false);
+                                reply = '✅ Antilink OFF!';
                             } else {
-                                const current = getGroupSetting(from, 'antilink') ? 'ON' : 'OFF';
-                                response = `🔗 *Antilink Status:* ${current}\n\nUsage: ${prefix}antilink on/off`;
+                                reply = `🔗 Antilink: ${getSetting(from, 'antilink') ? 'ON' : 'OFF'}\n\nUsage: ${config.prefix}antilink on/off`;
                             }
                             break;
                         
                         case 'welcome':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            const welcomeStatus = args[0]?.toLowerCase();
-                            if (welcomeStatus === 'on') {
-                                setGroupSetting(from, 'welcome', true);
-                                response = '✅ Welcome messages: *ON*';
-                            } else if (welcomeStatus === 'off') {
-                                setGroupSetting(from, 'welcome', false);
-                                response = '✅ Welcome messages: *OFF*';
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (args[0] === 'on') {
+                                setSetting(from, 'welcome', true);
+                                reply = '✅ Welcome ON!';
+                            } else if (args[0] === 'off') {
+                                setSetting(from, 'welcome', false);
+                                reply = '✅ Welcome OFF!';
                             } else {
-                                const current = getGroupSetting(from, 'welcome') ? 'ON' : 'OFF';
-                                response = `👋 *Welcome Status:* ${current}\n\nUsage: ${prefix}welcome on/off`;
+                                reply = `👋 Welcome: ${getSetting(from, 'welcome') ? 'ON' : 'OFF'}\n\nUsage: ${config.prefix}welcome on/off`;
                             }
                             break;
                         
                         case 'goodbye':
                         case 'bye':
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            if (!await isAdmin(sock, from, sender) && !isOwner) {
-                                response = '❌ Only admins can use this command!';
-                                break;
-                            }
-                            const goodbyeStatus = args[0]?.toLowerCase();
-                            if (goodbyeStatus === 'on') {
-                                setGroupSetting(from, 'goodbye', true);
-                                response = '✅ Goodbye messages: *ON*';
-                            } else if (goodbyeStatus === 'off') {
-                                setGroupSetting(from, 'goodbye', false);
-                                response = '✅ Goodbye messages: *OFF*';
+                            if (!isGroup) { reply = '❌ Groups only!'; break; }
+                            if (!await isAdmin(from, sender) && !isOwner) { reply = '❌ Admins only!'; break; }
+                            if (args[0] === 'on') {
+                                setSetting(from, 'goodbye', true);
+                                reply = '✅ Goodbye ON!';
+                            } else if (args[0] === 'off') {
+                                setSetting(from, 'goodbye', false);
+                                reply = '✅ Goodbye OFF!';
                             } else {
-                                const current = getGroupSetting(from, 'goodbye') ? 'ON' : 'OFF';
-                                response = `👋 *Goodbye Status:* ${current}\n\nUsage: ${prefix}goodbye on/off`;
+                                reply = `👋 Goodbye: ${getSetting(from, 'goodbye') ? 'ON' : 'OFF'}\n\nUsage: ${config.prefix}goodbye on/off`;
                             }
                             break;
                         
-                        // ═══════ OWNER COMMANDS ═══════
-                        case 'broadcast':
-                        case 'bc':
-                            if (!isOwner) {
-                                response = '❌ Only owner can use this command!';
-                                break;
-                            }
-                            if (!args.length) {
-                                response = `❌ Usage: ${prefix}broadcast Your message here`;
-                                break;
-                            }
-                            // Broadcast logic here
-                            response = '✅ Broadcast sent to all chats!';
+                        // ═══════ OWNER ═══════
+                        case 'join':
+                            if (!isOwner) { reply = '❌ Owner only!'; break; }
+                            if (!args[0]) { reply = '❌ Provide link!'; break; }
+                            try {
+                                const code = args[0].split('chat.whatsapp.com/')[1];
+                                if (!code) { reply = '❌ Invalid link!'; break; }
+                                await sock.groupAcceptInvite(code);
+                                reply = '✅ Joined!';
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'leave':
-                            if (!isOwner) {
-                                response = '❌ Only owner can use this command!';
-                                break;
-                            }
-                            if (!isGroup) {
-                                response = '❌ This command is only for groups!';
-                                break;
-                            }
-                            await sock.sendMessage(from, { text: '👋 Goodbye everyone!' });
+                            if (!isOwner) { reply = '❌ Owner only!'; break; }
+                            if (!isGroup) { reply = '❌ Use in group!'; break; }
+                            await sock.sendMessage(from, { text: '👋 Goodbye!' });
                             await sock.groupLeave(from);
                             return;
                         
-                        case 'join':
-                            if (!isOwner) {
-                                response = '❌ Only owner can use this command!';
-                                break;
-                            }
-                            if (!args[0]) {
-                                response = `❌ Usage: ${prefix}join <group link>`;
-                                break;
-                            }
-                            try {
-                                const linkCode = args[0].split('chat.whatsapp.com/')[1];
-                                if (!linkCode) {
-                                    response = '❌ Invalid group link!';
-                                    break;
-                                }
-                                await sock.groupAcceptInvite(linkCode);
-                                response = '✅ Successfully joined the group!';
-                            } catch {
-                                response = '❌ Failed to join group!';
-                            }
-                            break;
-                        
                         case 'block':
-                            if (!isOwner) {
-                                response = '❌ Only owner can use this command!';
-                                break;
-                            }
-                            const blockTarget = getMentionedJid(msg)[0] || getQuotedParticipant(msg) || (args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null);
-                            if (!blockTarget) {
-                                response = `❌ Usage: ${prefix}block @user or number`;
-                                break;
-                            }
+                            if (!isOwner) { reply = '❌ Owner only!'; break; }
+                            const blockTarget = getMentioned(msg)[0] || (args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null);
+                            if (!blockTarget) { reply = '❌ Tag or provide number!'; break; }
                             try {
                                 await sock.updateBlockStatus(blockTarget, 'block');
-                                response = `✅ Blocked @${blockTarget.split('@')[0]}`;
-                            } catch {
-                                response = '❌ Failed to block!';
-                            }
+                                reply = `✅ Blocked!`;
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         case 'unblock':
-                            if (!isOwner) {
-                                response = '❌ Only owner can use this command!';
-                                break;
-                            }
-                            const unblockTarget = args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
-                            if (!unblockTarget) {
-                                response = `❌ Usage: ${prefix}unblock <number>`;
-                                break;
-                            }
+                            if (!isOwner) { reply = '❌ Owner only!'; break; }
+                            if (!args[0]) { reply = '❌ Provide number!'; break; }
                             try {
-                                await sock.updateBlockStatus(unblockTarget, 'unblock');
-                                response = `✅ Unblocked @${unblockTarget.split('@')[0]}`;
-                            } catch {
-                                response = '❌ Failed to unblock!';
-                            }
-                            break;
-                        
-                        case 'blocklist':
-                            if (!isOwner) {
-                                response = '❌ Only owner can use this command!';
-                                break;
-                            }
-                            try {
-                                const blocked = await sock.fetchBlocklist();
-                                if (!blocked.length) {
-                                    response = '📋 No blocked contacts.';
-                                } else {
-                                    response = `📋 *Blocked Contacts (${blocked.length}):*\n\n` + 
-                                        blocked.map((b, i) => `${i + 1}. ${b.split('@')[0]}`).join('\n');
-                                }
-                            } catch {
-                                response = '❌ Failed to get blocklist!';
-                            }
+                                await sock.updateBlockStatus(args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net', 'unblock');
+                                reply = '✅ Unblocked!';
+                            } catch { reply = '❌ Failed!'; }
                             break;
                         
                         default:
-                            response = `❌ Unknown command: *${cmd}*\n\nType *${prefix}menu* to see all commands.`;
+                            reply = `❌ Unknown: *${cmd}*\n\nType *${config.prefix}menu*`;
                     }
                     
-                    // Send response
-                    if (response) {
-                        await sock.sendMessage(from, { text: response }, { quoted: msg });
-                    }
-                    
-                    await sock.sendMessage(from, { react: { text: '✅', key: msg.key } });
-                    console.log('✅ Command completed');
-                    
-                } catch (err) {
-                    console.log('❌ Command error:', err.message);
-                    await sock.sendMessage(from, { react: { text: '❌', key: msg.key } });
-                    await sock.sendMessage(from, { text: `❌ Error: ${err.message}` }, { quoted: msg });
+                } catch (e) {
+                    console.log('Command error:', e.message);
+                    reply = `❌ Error: ${e.message}`;
                 }
                 
-            } catch (err) {
-                console.log('❌ Handler error:', err.message);
+                // Send reply
+                if (reply) {
+                    await sock.sendMessage(from, { text: reply }, { quoted: msg });
+                }
+                await sock.sendMessage(from, { react: { text: '✅', key: msg.key } }).catch(() => {});
+                
+            } catch (e) {
+                console.log('Handler error:', e.message);
             }
         });
         
-        // ═══════════════════════════════════════════════════════════════
-        //                    GROUP EVENTS (Welcome/Goodbye)
-        // ═══════════════════════════════════════════════════════════════
-        
-        sock.ev.on('group-participants.update', async (event) => {
+        // ═══════ GROUP EVENTS ═══════
+        sock.ev.on('group-participants.update', async ({ id, participants, action }) => {
             try {
-                const { id, participants, action } = event;
-                
-                if (action === 'add' && getGroupSetting(id, 'welcome')) {
-                    const group = await sock.groupMetadata(id);
-                    for (const participant of participants) {
-                        const welcomeText = `
-╔═══════════════════════════╗
-║   👋 *WELCOME!* 👋        ║
-╠═══════════════════════════╣
-║                           ║
-║  Welcome to *${group.subject}*!
-║                           ║
-║  👤 @${participant.split('@')[0]}
-║  👥 Member #${group.participants.length}
-║                           ║
-║  📜 Read the rules!       ║
-║  🎉 Enjoy your stay!      ║
-║                           ║
-╚═══════════════════════════╝`;
-                        await sock.sendMessage(id, { 
-                            text: welcomeText, 
-                            mentions: [participant] 
+                if (action === 'add' && getSetting(id, 'welcome')) {
+                    const meta = await sock.groupMetadata(id);
+                    for (const p of participants) {
+                        await sock.sendMessage(id, {
+                            text: `👋 Welcome @${p.split('@')[0]} to *${meta.subject}*!\n\n👥 Member #${meta.participants.length}`,
+                            mentions: [p]
                         });
                     }
                 }
                 
-                if (action === 'remove' && getGroupSetting(id, 'goodbye')) {
-                    for (const participant of participants) {
-                        const goodbyeText = `
-╔═══════════════════════════╗
-║   👋 *GOODBYE!* 👋        ║
-╠═══════════════════════════╣
-║                           ║
-║  @${participant.split('@')[0]} has left
-║                           ║
-║  We'll miss you! 😢       ║
-║                           ║
-╚═══════════════════════════╝`;
-                        await sock.sendMessage(id, { 
-                            text: goodbyeText, 
-                            mentions: [participant] 
+                if (action === 'remove' && getSetting(id, 'goodbye')) {
+                    for (const p of participants) {
+                        await sock.sendMessage(id, {
+                            text: `👋 Goodbye @${p.split('@')[0]}!\n\nWe'll miss you! 😢`,
+                            mentions: [p]
                         });
                     }
                 }
-                
-            } catch (err) {
-                console.log('Group event error:', err.message);
+            } catch (e) {
+                console.log('Group event error:', e.message);
             }
         });
         
-    } catch (err) {
-        console.log('❌ Start error:', err.message);
-        connectionStatus = 'error';
-        connectionMessage = err.message;
+    } catch (e) {
+        console.log('Start error:', e.message);
+        connectionStatus = 'disconnected';
         retryCount++;
-        
-        if (retryCount > 3) {
-            clearAuthFolder();
-            retryCount = 0;
-        }
-        
-        setTimeout(startBot, 10000);
+        setTimeout(startBot, 5000);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//                    START THE BOT
+//                    START
 // ═══════════════════════════════════════════════════════════════
 
 console.log(`
-╔═══════════════════════════════════════════════════════════╗
-║                                                           ║
-║   ██████╗ ██╗      █████╗ ██╗   ██╗██╗███╗   ██╗██╗  ██╗ ║
-║  ██╔═══██╗██║     ██╔══██╗╚██╗ ██╔╝██║████╗  ██║██║ ██╔╝ ║
-║  ██║   ██║██║     ███████║ ╚████╔╝ ██║██╔██╗ ██║█████╔╝  ║
-║  ██║   ██║██║     ██╔══██║  ╚██╔╝  ██║██║╚██╗██║██╔═██╗  ║
-║  ╚██████╔╝███████╗██║  ██║   ██║   ██║██║ ╚████║██║  ██╗ ║
-║   ╚═════╝ ╚══════╝╚═╝  ╚═╝   ╚═╝   ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝ ║
-║                                                           ║
-║              🤖 BOT V2 - VIEW ONCE + ADMIN 🤖             ║
-║                  👑 by ${config.ownerName}                         ║
-║                                                           ║
-╠═══════════════════════════════════════════════════════════╣
-║  📸 View Once Saver: ✅ Active                            ║
-║  👑 Admin Commands: ✅ Ready                              ║
-║  👥 Group Tools: ✅ Enabled                               ║
-╚═══════════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════╗
+║  🤖 ${config.botName}
+║  👑 Owner: ${config.ownerName}
+║  📱 Number: ${config.ownerNumber}
+╠═══════════════════════════════════════╣
+║  📸 ViewOnce Saver: ✅ ON
+║  👑 Admin Commands: ✅ Ready
+║  👥 Group Tools: ✅ Ready
+╚═══════════════════════════════════════╝
 `);
 
 startBot();
